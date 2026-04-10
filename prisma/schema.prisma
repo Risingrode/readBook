@@ -1,0 +1,36 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Book {
+  id           String   @id @default(cuid())
+  title        String
+  format       String   // "txt", "pdf", "epub"
+  filePath     String   // path where the file is stored
+  coverImage   String?  // optional cover
+  extractedText String? // for small/medium books, or just metadata
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  progress     ReadingProgress?
+}
+
+model ReadingProgress {
+  id           String   @id @default(cuid())
+  bookId       String   @unique
+  book         Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  progress     Float    @default(0) // 0 to 100 percentage or character index
+  lastRead     DateTime @default(now())
+}
+
+model UserStats {
+  id           String   @id @default(cuid())
+  streakDays   Int      @default(0)
+  totalReadMin Int      @default(0)
+  lastReadDate DateTime @default(now())
+}
