@@ -1,5 +1,5 @@
 import fs from 'fs/promises';
-const EPub = require('epub2');
+const EPub = require('epub2').EPub;
 
 /**
  * Server-only parser for multiple formats
@@ -24,25 +24,28 @@ export async function parseEbookToText(filePath: string, format: string): Promis
   }
 
   if (ext === 'epub') {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const epub = new EPub(filePath);
-      epub.on('end', () => {
-        let text = '';
-        const promises = epub.flow.map((chapter: any) => {
-          return new Promise<void>((res) => {
-            epub.getChapter(chapter.id, (error: any, chapterText: string) => {
-              if (!error && chapterText) {
-                // Strip HTML tags roughly
-                const plain = chapterText.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').trim();
-                if (plain) {
-                  text += plain + '\n\n';
+      epub.on('end', async () => {
+        try {
+          const promises = epub.flow.map((chapter: any) => {
+            return new Promise<string>((res) => {
+              epub.getChapter(chapter.id, (error: any, chapterText: string) => {
+                if (!error && chapterText) {
+                  const plain = chapterText.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').trim();
+                  res(plain ? plain + '\n\n' : '');
+                } else {
+                  res('');
                 }
-              }
-              res();
+              });
             });
           });
-        });
-        Promise.all(promises).then(() => resolve(text));
+          const texts = await Promise.all(promises);
+          resolve(texts.join(''));
+        } catch (e) {
+          console.error('EPub chapter extraction error', e);
+          resolve('');
+        }
       });
       epub.on('error', (err: any) => {
         console.error('EPub parsing error', err);

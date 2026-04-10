@@ -23,11 +23,11 @@ export default function Uploader({ onUploadSuccess }: { onUploadSuccess: () => v
       if (res.ok) {
         onUploadSuccess();
       } else {
-        alert('Upload failed');
+        alert('上传失败');
       }
     } catch (err) {
       console.error(err);
-      alert('Upload error');
+      alert('上传错误');
     } finally {
       setIsUploading(false);
       e.target.value = '';
@@ -47,15 +47,15 @@ export default function Uploader({ onUploadSuccess }: { onUploadSuccess: () => v
         {isUploading ? (
           <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col items-center">
             <Loader2 className="w-8 h-8 animate-spin mb-3 text-emerald-500" />
-            <p className="text-sm font-medium">Extracting your book...</p>
+            <p className="text-sm font-medium">正在提取您的书籍...</p>
           </motion.div>
         ) : (
           <motion.div key="idle" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col items-center">
             <div className="w-12 h-12 bg-gray-50 dark:bg-gray-800 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform shadow-sm">
               <Upload className="w-5 h-5" />
             </div>
-            <p className="font-semibold mb-1">Add a new book</p>
-            <p className="text-xs opacity-70">Supports TXT, PDF, EPUB</p>
+            <p className="font-semibold mb-1">添加新书</p>
+            <p className="text-xs opacity-70">支持 TXT, PDF, EPUB</p>
           </motion.div>
         )}
       </AnimatePresence>
