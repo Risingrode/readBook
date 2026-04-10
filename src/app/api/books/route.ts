@@ -16,7 +16,13 @@ export async function GET() {
     let userStats = await prisma.userStats.findFirst();
     if (!userStats) {
       userStats = await prisma.userStats.create({
-        data: {}
+        data: {
+          streakDays: 0,
+          totalReadMin: 0,
+          exp: 0,
+          level: 1,
+          flameHealth: 100
+        }
       });
     }
 

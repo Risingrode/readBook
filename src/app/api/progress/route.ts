@@ -29,7 +29,7 @@ export async function POST(req: Request) {
       userStats = await prisma.userStats.create({ data: {} });
     }
 
-    // Calculate streak
+    // Calculate streak and EXP
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const lastRead = new Date(userStats.lastReadDate);
@@ -38,20 +38,29 @@ export async function POST(req: Request) {
     const diffDays = Math.round((today.getTime() - lastRead.getTime()) / (1000 * 60 * 60 * 24));
     
     let newStreak = userStats.streakDays;
+    let newFlameHealth = userStats.flameHealth;
+    
     if (diffDays === 1) {
-      newStreak += 1; // Read consecutive day
+      newStreak += 1;
+      newFlameHealth = Math.min(100, newFlameHealth + 10);
     } else if (diffDays > 1) {
-      newStreak = 1; // Streak broken
-    } else if (diffDays === 0 && userStats.streakDays === 0) {
-      newStreak = 1; // First day
+      newStreak = 1;
+      newFlameHealth = Math.max(0, newFlameHealth - (diffDays * 5)); // Penalty for missing days
     }
+
+    const expGained = Math.floor((readingTime || 0) * 2) + 5; // 2 EXP per minute + 5 base
+    const totalExp = userStats.exp + expGained;
+    const newLevel = Math.floor(totalExp / 100) + 1;
 
     userStats = await prisma.userStats.update({
       where: { id: userStats.id },
       data: {
         streakDays: newStreak,
         totalReadMin: userStats.totalReadMin + (readingTime || 0),
-        lastReadDate: new Date()
+        lastReadDate: new Date(),
+        exp: totalExp,
+        level: newLevel,
+        flameHealth: newFlameHealth
       }
     });
 

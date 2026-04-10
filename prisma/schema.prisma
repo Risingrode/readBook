@@ -33,4 +33,23 @@ model UserStats {
   streakDays   Int      @default(0)
   totalReadMin Int      @default(0)
   lastReadDate DateTime @default(now())
+  exp          Int      @default(0)
+  level        Int      @default(1)
+  flameHealth  Int      @default(100)
+}
+
+model MemoryNode {
+  id           String   @id @default(cuid())
+  keyword      String
+  context      String?
+  mastery      Int      @default(0)
+  lastReviewed DateTime @default(now())
+  createdAt    DateTime @default(now())
+}
+
+model Inventory {
+  id           String   @id @default(cuid())
+  itemName     String
+  quantity     Int      @default(0)
+  type         String   // e.g., "shield", "theme"
 }

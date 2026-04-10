@@ -1,64 +1,57 @@
 import fs from 'fs/promises';
-import path from 'path';
+const EPub = require('epub2');
 
-// Fix TS Next.js Turbopack compat by using dynamic require
-if (typeof globalThis !== 'undefined') {
-  if (!(globalThis as any).DOMMatrix) (globalThis as any).DOMMatrix = class DOMMatrix {};
-  if (!(globalThis as any).ImageData) (globalThis as any).ImageData = class ImageData {};
-  if (!(globalThis as any).Path2D) (globalThis as any).Path2D = class Path2D {};
-}
-const pdfParse = require('pdf-parse');
-const epubModule = require('epub2');
-const EPub = epubModule.EPub || epubModule.default || epubModule;
-
+/**
+ * Server-only parser for multiple formats
+ */
 export async function parseEbookToText(filePath: string, format: string): Promise<string> {
+  const contentBuffer = await fs.readFile(filePath);
   const ext = format.toLowerCase();
   
   if (ext === 'txt') {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return content;
+    return contentBuffer.toString('utf-8');
   }
-  
+
   if (ext === 'pdf') {
-    const dataBuffer = await fs.readFile(filePath);
-    const data = await pdfParse(dataBuffer);
-    return data.text;
+    try {
+      const pdfParse = require('pdf-parse');
+      const data = await pdfParse(contentBuffer);
+      return data.text || '';
+    } catch (e) {
+      console.error('PDF parsing error', e);
+      return '';
+    }
   }
-  
+
   if (ext === 'epub') {
     return new Promise((resolve, reject) => {
       const epub = new EPub(filePath);
       epub.on('end', () => {
-        let fullText = '';
-        let chapterCount = epub.flow.length;
-        let processedCount = 0;
-
-        if (chapterCount === 0) {
-          return resolve('');
-        }
-
-        epub.flow.forEach((chapter: any) => {
-          epub.getChapter(chapter.id, (err: Error | null, text: string) => {
-            if (err) {
-              console.error('Error reading epub chapter', err);
-            } else {
-              // Basic strip HTML tags
-              const cleanText = (text || '').replace(/<[^>]+>/g, ' ');
-              fullText += cleanText + '\\n\\n';
-            }
-            processedCount++;
-            if (processedCount === chapterCount) {
-              resolve(fullText);
-            }
+        let text = '';
+        const promises = epub.flow.map((chapter: any) => {
+          return new Promise<void>((res) => {
+            epub.getChapter(chapter.id, (error: any, chapterText: string) => {
+              if (!error && chapterText) {
+                // Strip HTML tags roughly
+                const plain = chapterText.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').trim();
+                if (plain) {
+                  text += plain + '\n\n';
+                }
+              }
+              res();
+            });
           });
         });
+        Promise.all(promises).then(() => resolve(text));
       });
-      epub.on('error', (err: Error) => {
-        reject(err);
+      epub.on('error', (err: any) => {
+        console.error('EPub parsing error', err);
+        resolve(contentBuffer.toString('utf-8').replace(/[^\x20-\x7E\n]/g, '')); // Fallback
       });
       epub.parse();
     });
   }
-
-  throw new Error('Unsupported format');
+  
+  // Basic sanitization fallback
+  return contentBuffer.toString('utf-8');
 }
