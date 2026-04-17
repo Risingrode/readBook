@@ -2,13 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import Uploader from '@/components/Uploader';
-import { Book, Flame, Clock, Sparkles, Pencil, Trash2, Check, X } from 'lucide-react';
+import { Book, Clock, Pencil, Trash2, Check, X, Sun, Moon, Bookmark, Highlighter } from 'lucide-react';
 import Link from 'next/link';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useRouter } from 'next/navigation';
+import { motion } from 'framer-motion';
+import { useTheme } from '@/components/ThemeProvider';
 
 export default function Home() {
   const [books, setBooks] = useState<any[]>([]);
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<{ totalReadMin: number } | null>(null);
+  const { theme, toggleTheme } = useTheme();
+  const router = useRouter();
   
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState<string>('');
@@ -65,60 +69,55 @@ export default function Home() {
     }
   };
 
+  const formatReadTime = (minutes: number) => {
+    if (minutes < 60) return `${minutes} 分钟`;
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return mins > 0 ? `${hours} 小时 ${mins} 分钟` : `${hours} 小时`;
+  };
+
   return (
     <main className="min-h-screen max-w-5xl mx-auto px-6 py-12 flex flex-col font-sans tracking-wide">
       <header className="flex flex-col md:flex-row justify-between items-start md:items-end mb-16 gap-8">
         <div>
           <h1 className="text-5xl font-light tracking-tighter mb-2">书库</h1>
-          <p className="text-gray-500 dark:text-gray-400 font-light text-lg">你的交互式认知成长空间。</p>
+          <p className="text-muted font-light text-lg">安静阅读，专注当下。</p>
         </div>
         
-        {stats && (
-          <motion.div 
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="flex flex-wrap gap-4 text-sm font-medium"
-          >
-            <div className="flex flex-col gap-1">
-               <div className="flex items-center gap-2 bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 px-4 py-2 rounded-full shadow-sm border border-indigo-100 dark:border-indigo-500/20">
-                <Sparkles className="w-4 h-4" />
-                <span>等级 {stats.level} <span className="text-indigo-400 ml-1">· {stats.exp % 100}/100 经验</span></span>
-              </div>
-              <div className="h-1 w-full bg-indigo-100 dark:bg-indigo-950 rounded-full overflow-hidden">
-                <motion.div 
-                  initial={{ width: 0 }}
-                  animate={{ width: `${stats.exp % 100}%` }}
-                  className="h-full bg-indigo-500" 
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 bg-orange-50 text-orange-600 dark:bg-orange-500/10 px-4 py-2 rounded-full shadow-sm border border-orange-100 dark:border-orange-500/20">
-              <Flame className={`w-4 h-4 ${stats.flameHealth < 30 ? 'animate-pulse' : ''}`} />
-              <span>连续阅读 {stats.streakDays} 天 · {stats.flameHealth}% 健康值</span>
-            </div>
-
-            <div className="flex items-center gap-2 bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 px-4 py-2 rounded-full shadow-sm border border-emerald-100 dark:border-emerald-500/20">
+        <div className="flex items-center gap-4">
+          {stats && stats.totalReadMin > 0 && (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="flex items-center gap-2 text-sm font-medium text-muted"
+            >
               <Clock className="w-4 h-4" />
-              <span>{Math.floor(stats.totalReadMin / 60)}小时 {stats.totalReadMin % 60}分钟</span>
-            </div>
-          </motion.div>
-        )}
+              <span>累计阅读 {formatReadTime(stats.totalReadMin)}</span>
+            </motion.div>
+          )}
+          <button
+            onClick={toggleTheme}
+            className="p-2 rounded-lg hover:bg-surface transition-colors"
+            title={theme === 'light' ? '切换夜间模式' : '切换白天模式'}
+          >
+            {theme === 'light' ? <Moon className="w-4 h-4 text-muted" /> : <Sun className="w-4 h-4 text-muted" />}
+          </button>
+        </div>
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
         <Uploader onUploadSuccess={fetchBooks} />
         
         {books.map((book) => (
-          <div key={book.id} className="relative group border border-gray-200 dark:border-gray-800 rounded-2xl h-full flex flex-col bg-white dark:bg-[#0a0a0a] hover:shadow-xl hover:border-gray-300 transition-all duration-500 overflow-hidden">
+          <div key={book.id} className="relative group border border-border rounded-2xl h-full flex flex-col bg-background hover:shadow-xl hover:border-surface-hover transition-all duration-500 overflow-hidden">
             <Link href={`/read/${book.id}`} className="flex-grow p-8 flex flex-col">
-              <div className="absolute top-0 left-0 w-full h-1 bg-gray-100 dark:bg-gray-800">
+              <div className="absolute top-0 left-0 w-full h-[2px] bg-progress-bg">
                 <div 
-                  className="h-full bg-emerald-400 transition-all duration-500"
+                  className="h-full bg-progress-fill transition-all duration-500"
                   style={{ width: `${book.progress?.progress || 0}%` }}
                 />
               </div>
-              <Book className="w-8 h-8 mb-6 text-gray-300 group-hover:text-gray-800 dark:group-hover:text-gray-100 transition-colors" />
+              <Book className="w-8 h-8 mb-6 text-muted opacity-60 group-hover:text-foreground group-hover:opacity-100 transition-colors" />
               
               {editingId === book.id ? (
                 <div className="mb-2" onClick={(e) => e.preventDefault()}>
@@ -130,7 +129,7 @@ export default function Home() {
                       if (e.key === 'Enter') saveEdit(e as any, book.id);
                       if (e.key === 'Escape') cancelEdit(e as any);
                     }}
-                    className="w-full bg-gray-100 dark:bg-gray-800 border-none rounded p-1 text-sm outline-none text-black dark:text-white"
+                    className="w-full bg-surface border-none rounded p-1 text-sm outline-none text-foreground"
                     autoFocus
                   />
                   <div className="flex gap-2 mt-2">
@@ -139,26 +138,76 @@ export default function Home() {
                   </div>
                 </div>
               ) : (
-                <h2 className="text-lg font-medium leading-snug mb-2 line-clamp-2 group-hover:text-emerald-600 transition-colors">{book.title}</h2>
+                <h2 className="text-lg font-medium leading-snug mb-2 line-clamp-2 group-hover:text-muted transition-colors">{book.title}</h2>
               )}
 
-              <div className="mt-auto pt-6 flex justify-between items-center text-xs text-gray-400 uppercase tracking-wider font-semibold">
+              <div className="mt-auto pt-6 flex justify-between items-center text-xs text-muted uppercase tracking-wider font-semibold">
                 <span>{book.format}</span>
-                <span>{Math.round(book.progress?.progress || 0)}%</span>
+                <div className="flex items-center gap-2">
+                  {book.annotations?.length > 0 && (
+                    <span className="flex items-center gap-1 normal-case tracking-normal font-normal">
+                      <Highlighter className="w-3 h-3" />
+                      {book.annotations.length}
+                    </span>
+                  )}
+                  {book.bookmarks?.length > 0 && (
+                    <span className="flex items-center gap-1 normal-case tracking-normal font-normal">
+                      <Bookmark className="w-3 h-3" />
+                      {book.bookmarks.length}
+                    </span>
+                  )}
+                  <span>{Math.round(book.progress?.progress || 0)}%</span>
+                </div>
               </div>
+
+              {/* Bookmarks list */}
+              {book.bookmarks?.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-border space-y-1">
+                  {book.bookmarks.slice(0, 3).map((bm: any) => (
+                    <button
+                      key={bm.id}
+                      className="flex items-center gap-2 text-xs text-muted hover:text-foreground transition-colors py-0.5 w-full text-left"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const url = bm.slideIndex != null
+                          ? `/read/${book.id}?slide=${bm.slideIndex}&mode=${bm.mode}`
+                          : `/read/${book.id}?progress=${bm.progress}&mode=${bm.mode}`;
+                        router.push(url);
+                      }}
+                    >
+                      <Bookmark className="w-2.5 h-2.5 flex-shrink-0" />
+                      <span className="truncate">
+                        {bm.mode === 'paginate' && bm.slideIndex != null
+                          ? `第 ${bm.slideIndex + 1} 页`
+                          : `${Math.round(bm.progress)}%`
+                        }
+                      </span>
+                    </button>
+                  ))}
+                  {book.bookmarks.length > 3 && (
+                    <button
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); router.push(`/read/${book.id}`); }}
+                      className="text-[10px] text-muted hover:text-foreground transition-colors"
+                    >
+                      还有 {book.bookmarks.length - 3} 个书签...
+                    </button>
+                  )}
+                </div>
+              )}
             </Link>
 
             <div className="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
               <button 
                 onClick={(e) => startEdit(e, book)}
-                className="p-1.5 bg-gray-100 dark:bg-gray-800 rounded-md text-gray-600 hover:text-indigo-600 transition-colors"
+                className="p-1.5 bg-surface rounded-md text-muted hover:text-foreground transition-colors"
                 title="编辑标题"
               >
                 <Pencil size={14} />
               </button>
               <button 
                 onClick={(e) => handleDelete(e, book.id)}
-                className="p-1.5 bg-gray-100 dark:bg-gray-800 rounded-md text-gray-600 hover:text-red-600 transition-colors"
+                className="p-1.5 bg-surface rounded-md text-muted hover:text-red-500 transition-colors"
                 title="删除书籍"
               >
                 <Trash2 size={14} />

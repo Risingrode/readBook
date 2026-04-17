@@ -8,7 +8,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     const { id } = await params;
     const book = await prisma.book.findUnique({
       where: { id },
-      include: { progress: true }
+      include: { progress: true, bookmarks: { orderBy: { progress: 'asc' } }, annotations: { orderBy: { progress: 'asc' } } }
     });
 
     if (!book) {

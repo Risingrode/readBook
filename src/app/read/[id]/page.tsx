@@ -1,451 +1,832 @@
 'use client';
 
-import { useEffect, useState, useRef, use } from 'react';
-import { useRouter } from 'next/navigation';
-import { ArrowLeft, Sparkles, Flame, ChevronRight, ChevronLeft, Gift, Zap, Lock } from 'lucide-react';
+import { useEffect, useState, useRef, useCallback, useMemo, use, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { ArrowLeft, ChevronRight, ChevronLeft, BookOpen, ScrollText, Sun, Moon, Bookmark, X, Highlighter } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { chunkText, identifyKeywords } from '@/lib/reader-utils';
-import { useGameStore } from '@/lib/store';
-import confetti from 'canvas-confetti';
+import { chunkText, parseParagraphs, isCJK } from '@/lib/reader-utils';
+import { computeSegments, getHighlightClass, getSelectionContext } from '@/lib/highlight-utils';
+import type { AnnotationData } from '@/lib/highlight-utils';
+import { useTheme } from '@/components/ThemeProvider';
+import AnnotationToolbar from '@/components/AnnotationToolbar';
+import AnnotationPanel from '@/components/AnnotationPanel';
 
-export default function Reader({ params }: { params: Promise<{ id: string }> }) {
+type ReadMode = 'paginate' | 'scroll';
+
+function ReaderInner({ params }: { params: Promise<{ id: string }> }) {
   const unwrappedParams = use(params);
   const { id } = unwrappedParams;
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const [book, setBook] = useState<any>(null);
-  const [slides, setSlides] = useState<string[]>([]);
+  const [book, setBook] = useState<{ title: string; format: string; progress?: { progress: number } | null } | null>(null);
+  const [fullText, setFullText] = useState('');
+  const [slides, setSlides] = useState<string[][]>([]);
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
-  const [progress, setProgress] = useState(0);
-  
-  // Memory Game State
-  const [hiddenKeywords, setHiddenKeywords] = useState<string[]>([]);
-  const [revealedKeywords, setRevealedKeywords] = useState<Set<string>>(new Set());
-  const [showRecallGame, setShowRecallGame] = useState(false);
+  const [readMode, setReadMode] = useState<ReadMode>('paginate');
+  const [loading, setLoading] = useState(true);
+  const [scrollProgress, setScrollProgress] = useState(0);
+  const [bookmarks, setBookmarks] = useState<{ id: string; progress: number; label: string | null; mode: string; slideIndex: number | null; createdAt: string }[]>([]);
+  const [showBookmarks, setShowBookmarks] = useState(false);
+  const [bookmarkFlash, setBookmarkFlash] = useState(false);
 
-  // Warmup Game State (Ebbinghaus Forgetting Curve)
-  const [showWarmupGame, setShowWarmupGame] = useState(false);
-  const [warmupKeywords, setWarmupKeywords] = useState<string[]>([]);
-  const [warmupRevealed, setWarmupRevealed] = useState<Set<string>>(new Set());
+  // Annotation state
+  const [annotations, setAnnotations] = useState<AnnotationData[]>([]);
+  const [showAnnotations, setShowAnnotations] = useState(false);
+  const [toolbarVisible, setToolbarVisible] = useState(false);
+  const [toolbarPosition, setToolbarPosition] = useState({ top: 0, left: 0 });
+  const [noteAnnotation, setNoteAnnotation] = useState<{ color: string; selectedText: string; prefix: string; suffix: string } | null>(null); // Pending note creation (carries toolbar color)
+  const [noteText, setNoteText] = useState(''); // Controlled textarea for inline note input
+  const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(null); // Auto-scroll target in panel
 
-  // Cliffhanger State (Zeigarnik Effect)
-  const [showCliffhanger, setShowCliffhanger] = useState(false);
-  const [cliffhangerResolved, setCliffhangerResolved] = useState(false);
+  const { theme, toggleTheme } = useTheme();
 
-  const { setStats, level, exp, receiveDrop, activeDrop, clearDrop } = useGameStore();
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Parse paragraphs for scroll mode (memoized)
+  const paragraphs = useMemo(() => parseParagraphs(fullText), [fullText]);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const bookmarkPanelRef = useRef<HTMLDivElement>(null);
   const readStartTime = useRef<number>(Date.now());
+  const lastReportedProgress = useRef<number>(0);
+  const urlParamProgress = useRef<number | null>(null); // For bookmark jump from URL params
 
-  useEffect(() => {
-    audioRef.current = new Audio('https://cdn.pixabay.com/download/audio/2022/05/27/audio_1808fbf07a.mp3');
-    audioRef.current.loop = true;
-    audioRef.current.volume = 0.2;
-    return () => audioRef.current?.pause();
-  }, []);
-
+  // Fetch book data
   useEffect(() => {
     const fetchBook = async () => {
-      const res = await fetch(`/api/books/${id}`);
-      if (!res.ok) { router.push('/'); return; }
-      const data = await res.json();
-      setBook(data.book);
-      
-      const chunks = chunkText(data.content, 180); // Memory Chunks
-      setSlides(chunks);
-      
-      const savedIndex = Math.floor(((data.book.progress?.progress || 0) / 100) * chunks.length);
-      setCurrentSlideIndex(Math.min(savedIndex, chunks.length - 1));
-      
-      // Trigger Warmup if returning to read
-      if (data.book.progress?.progress > 0 && savedIndex < chunks.length - 1) {
-        const prevText = chunks.slice(Math.max(0, savedIndex - 5), savedIndex).join(' ');
-        const keys = identifyKeywords(prevText, 5);
-        if (keys.length > 0) {
-          setWarmupKeywords(keys);
-          setShowWarmupGame(true);
-        }
-      }
+      try {
+        const res = await fetch(`/api/books/${id}`);
+        if (!res.ok) { router.push('/'); return; }
+        const data = await res.json();
+        setBook(data.book);
+        setFullText(data.content || '');
 
-      if (data.userStats) setStats(data.userStats);
+        const chunks = chunkText(data.content, 180);
+        setSlides(chunks);
+
+        const savedProgress = data.book.progress?.progress || 0;
+        const savedIndex = Math.floor((savedProgress / 100) * chunks.length);
+        setCurrentSlideIndex(Math.min(savedIndex, chunks.length - 1));
+        lastReportedProgress.current = savedProgress;
+
+        // Load bookmarks
+        if (data.book.bookmarks) {
+          setBookmarks(data.book.bookmarks);
+        }
+
+        // Load annotations
+        if (data.book.annotations) {
+          setAnnotations(data.book.annotations);
+        }
+
+        // Handle bookmark jump from URL params (from home page)
+        const paramSlide = searchParams.get('slide');
+        const paramMode = searchParams.get('mode');
+        const paramProgress = searchParams.get('progress');
+        if (paramMode === 'paginate' && paramSlide != null) {
+          setReadMode('paginate');
+          const slideIdx = parseInt(paramSlide, 10);
+          if (!isNaN(slideIdx) && slideIdx >= 0 && slideIdx < chunks.length) {
+            setCurrentSlideIndex(slideIdx);
+            lastReportedProgress.current = ((slideIdx + 1) / chunks.length) * 100;
+          }
+        } else if (paramMode === 'scroll' && paramProgress != null) {
+          setReadMode('scroll');
+          const p = parseFloat(paramProgress);
+          if (!isNaN(p)) {
+            urlParamProgress.current = p;
+            lastReportedProgress.current = p;
+          }
+        }
+      } catch (e) {
+        console.error(e);
+        router.push('/');
+      } finally {
+        setLoading(false);
+      }
     };
     fetchBook();
-  }, [id, router, setStats]);
+  }, [id, router]);
 
-  const reportAction = async (idx: number, action?: string) => {
-    const p = ((idx + 1) / (slides.length || 1)) * 100;
-    setProgress(p);
-    
+  // Report progress to server
+  const reportProgress = useCallback(async (progressPercent: number) => {
+    // Only report if progress increased by at least 1%
+    if (progressPercent - lastReportedProgress.current < 1) return;
+    lastReportedProgress.current = progressPercent;
+
     const readMin = Math.round((Date.now() - readStartTime.current) / 60000);
-    readStartTime.current = Date.now();
-
-    const res = await fetch('/api/progress', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bookId: id, progress: p, readingTime: readMin, action })
-    });
-    
-    if (res.ok) {
-      const data = await res.json();
-      if (data.userStats) setStats(data.userStats);
-      if (data.activeDrop) receiveDrop(data.activeDrop);
-    }
-  };
-
-  const nextSlide = () => {
-    // Zeigarnik Effect: Cliffhanger Lock at 98% (or last slide)
-    if (currentSlideIndex === slides.length - 2 && !cliffhangerResolved) {
-       setShowCliffhanger(true);
-       return;
+    if (readMin > 0) {
+      readStartTime.current = Date.now();
     }
 
+    try {
+      await fetch('/api/progress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookId: id, progress: progressPercent, readingTime: readMin })
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  }, [id]);
+
+  // Paginate navigation
+  const nextSlide = useCallback(() => {
     if (currentSlideIndex < slides.length - 1) {
       const nextIdx = currentSlideIndex + 1;
       setCurrentSlideIndex(nextIdx);
-      reportAction(nextIdx, 'slide_read');
-      
-      // Setup Recall Game for every 3rd slide
-      if ((nextIdx + 1) % 3 === 0) {
-        setupRecallGame(slides[nextIdx]);
-      } else {
-        setShowRecallGame(false);
-      }
-    } else {
-      confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+      const p = ((nextIdx + 1) / slides.length) * 100;
+      reportProgress(p);
     }
-  };
+  }, [currentSlideIndex, slides.length, reportProgress]);
 
-  const prevSlide = () => {
+  const prevSlide = useCallback(() => {
     if (currentSlideIndex > 0) {
       setCurrentSlideIndex(currentSlideIndex - 1);
     }
+  }, [currentSlideIndex]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (readMode === 'paginate') {
+        if (e.key === 'ArrowRight' || e.key === ' ') {
+          e.preventDefault();
+          nextSlide();
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          prevSlide();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [readMode, nextSlide, prevSlide]);
+
+  // Scroll mode: track progress based on scroll position
+  useEffect(() => {
+    if (readMode !== 'scroll' || !scrollContainerRef.current) return;
+
+    const container = scrollContainerRef.current;
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const scrollPercent = Math.max(0, Math.min(100, scrollTop / (scrollHeight - clientHeight) * 100));
+      setScrollProgress(scrollPercent); // Smooth visual update
+      reportProgress(scrollPercent); // Server reporting (throttled by 1% threshold)
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [readMode, reportProgress]);
+
+  // Scroll mode: restore scroll position from saved progress or URL params
+  useEffect(() => {
+    if (readMode !== 'scroll' || !scrollContainerRef.current || !fullText) return;
+    // Prioritize URL param progress (bookmark jump), then server-saved progress
+    const targetProgress = urlParamProgress.current ?? book?.progress?.progress ?? 0;
+    if (targetProgress > 0) {
+      // Use requestAnimationFrame to ensure content is rendered
+      requestAnimationFrame(() => {
+        const container = scrollContainerRef.current;
+        if (container) {
+          const targetScroll = (targetProgress / 100) * (container.scrollHeight - container.clientHeight);
+          container.scrollTop = targetScroll;
+        }
+      });
+      // Clear URL param after using it
+      urlParamProgress.current = null;
+    }
+  }, [readMode, fullText, book]);
+
+  // Toggle read mode
+  const toggleMode = () => {
+    setReadMode(prev => prev === 'paginate' ? 'scroll' : 'paginate');
   };
 
-  const setupRecallGame = (text: string) => {
-    const keys = identifyKeywords(text, 2);
-    setHiddenKeywords(keys);
-    setRevealedKeywords(new Set());
-    setShowRecallGame(true);
-  };
+  // Bookmark actions
+  const addBookmark = async () => {
+    const progress = readMode === 'paginate'
+      ? ((currentSlideIndex + 1) / slides.length) * 100
+      : scrollProgress;
+    const slideIdx = readMode === 'paginate' ? currentSlideIndex : null;
 
-  const handleKeywordCapture = (word: string) => {
-    const newRevealed = new Set(revealedKeywords);
-    newRevealed.add(word);
-    setRevealedKeywords(newRevealed);
-    
-    reportAction(currentSlideIndex, 'keyword_capture');
-    
-    if (newRevealed.size === hiddenKeywords.length) {
-      confetti({ particleCount: 50, spread: 30, origin: { y: 0.8 } });
+    // Prevent duplicate: skip if a bookmark already exists within 1% or at same slide
+    const isDuplicate = bookmarks.some(bm => {
+      if (readMode === 'paginate' && bm.mode === 'paginate' && bm.slideIndex != null && slideIdx != null) {
+        return bm.slideIndex === slideIdx;
+      }
+      return Math.abs(bm.progress - progress) < 1;
+    });
+    if (isDuplicate) return;
+
+    try {
+      const res = await fetch('/api/bookmarks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: id,
+          progress: Math.round(progress * 10) / 10,
+          mode: readMode,
+          slideIndex: slideIdx,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBookmarks(prev => [...prev, data.bookmark].sort((a, b) => a.progress - b.progress));
+        // Visual feedback: flash animation
+        setBookmarkFlash(true);
+        setTimeout(() => setBookmarkFlash(false), 400);
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  const handleWarmupCapture = (word: string) => {
-    const newRev = new Set(warmupRevealed);
-    newRev.add(word);
-    setWarmupRevealed(newRev);
-    if (newRev.size === warmupKeywords.length) {
-       reportAction(currentSlideIndex, 'warmup_complete');
-       setShowWarmupGame(false);
-       confetti({ particleCount: 100, spread: 60, origin: { y: 0.5 } });
+  const deleteBookmark = async (bookmarkId: string) => {
+    try {
+      const res = await fetch(`/api/bookmarks?id=${bookmarkId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setBookmarks(prev => prev.filter(b => b.id !== bookmarkId));
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  const handleClearDrop = () => {
-    if (activeDrop?.rarity === 'legendary') {
-       confetti({ particleCount: 200, spread: 100, origin: { y: 0.4 }, colors: ['#fbbf24', '#f59e0b', '#d97706'] });
+  const jumpToBookmark = (bookmark: typeof bookmarks[0]) => {
+    setShowBookmarks(false);
+    if (bookmark.mode === 'paginate' && bookmark.slideIndex != null) {
+      setReadMode('paginate');
+      setCurrentSlideIndex(bookmark.slideIndex);
+    } else if (bookmark.mode === 'scroll') {
+      // Set urlParamProgress before mode switch so scroll-restore effect picks it up
+      urlParamProgress.current = bookmark.progress;
+      setReadMode('scroll');
+    } else {
+      // Fallback: use progress to calculate position
+      if (readMode === 'paginate') {
+        const targetIndex = Math.floor((bookmark.progress / 100) * slides.length);
+        setCurrentSlideIndex(Math.min(targetIndex, slides.length - 1));
+      } else {
+        urlParamProgress.current = bookmark.progress;
+        setReadMode('scroll');
+      }
     }
-    clearDrop();
   };
 
-  if (!book || slides.length === 0) {
+  // ===== Annotation actions =====
+
+  const saveAnnotation = async (params: {
+    text: string;
+    prefix: string;
+    suffix: string;
+    color: string;
+    note?: string | null;
+  }) => {
+    const progress = readMode === 'paginate'
+      ? ((currentSlideIndex + 1) / slides.length) * 100
+      : scrollProgress;
+    const slideIdx = readMode === 'paginate' ? currentSlideIndex : null;
+
+    try {
+      const res = await fetch('/api/annotations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: id,
+          text: params.text,
+          prefix: params.prefix,
+          suffix: params.suffix,
+          note: params.note || null,
+          color: params.color,
+          progress: Math.round(progress * 10) / 10,
+          mode: readMode,
+          slideIndex: slideIdx,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAnnotations(prev => [...prev, data.annotation as AnnotationData].sort((a, b) => a.progress - b.progress));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const addAnnotationFromSelection = async (color: string) => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+
+    const selectedText = selection.toString().trim();
+    if (!selectedText) return;
+
+    const textOffset = fullText.indexOf(selectedText);
+    const startOffset = textOffset !== -1 ? textOffset : 0;
+    const { prefix, suffix } = getSelectionContext(fullText, selectedText, startOffset);
+
+    await saveAnnotation({ text: selectedText, prefix, suffix, color });
+
+    selection.removeAllRanges();
+    setToolbarVisible(false);
+  };
+
+  const deleteAnnotation = async (annotationId: string) => {
+    try {
+      const res = await fetch(`/api/annotations?id=${annotationId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setAnnotations(prev => prev.filter(a => a.id !== annotationId));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const updateAnnotationNote = async (annotationId: string, note: string) => {
+    try {
+      const res = await fetch('/api/annotations', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: annotationId, note }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAnnotations(prev => prev.map(a => a.id === annotationId ? { ...a, note: data.annotation.note } : a));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const jumpToAnnotation = (ann: AnnotationData) => {
+    setShowAnnotations(false);
+    if (ann.mode === 'paginate' && ann.slideIndex != null) {
+      setReadMode('paginate');
+      setCurrentSlideIndex(ann.slideIndex);
+    } else if (ann.mode === 'scroll') {
+      urlParamProgress.current = ann.progress;
+      setReadMode('scroll');
+    } else {
+      if (readMode === 'paginate') {
+        const targetIndex = Math.floor((ann.progress / 100) * slides.length);
+        setCurrentSlideIndex(Math.min(targetIndex, slides.length - 1));
+      } else {
+        urlParamProgress.current = ann.progress;
+        setReadMode('scroll');
+      }
+    }
+  };
+
+  const exportAnnotations = async () => {
+    try {
+      const res = await fetch(`/api/annotations/export?bookId=${id}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${book?.title || '笔记'}_笔记.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // Text selection detection → show annotation toolbar
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.toString().trim().length === 0) {
+        setToolbarVisible(false);
+        return;
+      }
+
+      // Only show toolbar when selection is within our text content
+      const anchorNode = selection.anchorNode;
+      if (!anchorNode) return;
+      const textContainer = document.getElementById('reader-content');
+      if (!textContainer || !textContainer.contains(anchorNode)) {
+        setToolbarVisible(false);
+        return;
+      }
+
+      try {
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        setToolbarPosition({
+          top: rect.top,
+          left: rect.left + rect.width / 2,
+        });
+        setToolbarVisible(true);
+      } catch {
+        // Range access can fail in edge cases
+      }
+    };
+
+    // Debounce selection change events
+    let timer: ReturnType<typeof setTimeout>;
+    const debouncedHandler = () => {
+      clearTimeout(timer);
+      timer = setTimeout(handleSelectionChange, 150);
+    };
+
+    document.addEventListener('selectionchange', debouncedHandler);
+    return () => {
+      document.removeEventListener('selectionchange', debouncedHandler);
+      clearTimeout(timer);
+    };
+  }, []);
+
+  // Handle clicking on a highlighted segment to show/edit note
+  const handleHighlightClick = (annotationId: string) => {
+    setFocusedAnnotationId(annotationId);
+    setShowAnnotations(true);
+  };
+
+  // Render a paragraph with highlight segments
+  const renderHighlightedParagraph = (paraText: string, key: string | number, isCjk: boolean) => {
+    const segments = computeSegments(paraText, annotations);
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#fafafa] dark:bg-[#050505]">
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center">
-          <div className="w-12 h-12 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin mb-4" />
-          <span className="text-gray-400 font-light tracking-widest uppercase text-xs">正在同步神经通路...</span>
-        </motion.div>
+      <p key={key} className={isCjk ? 'cjk-indent' : ''}>
+        {segments.map((seg, i) => {
+          if (seg.annotationId) {
+            return (
+              <mark
+                key={i}
+                className={`${getHighlightClass(seg.color || 'yellow')} rounded-sm px-0.5 cursor-pointer hover:opacity-80 transition-opacity`}
+                onClick={() => handleHighlightClick(seg.annotationId!)}
+                title="点击查看笔记"
+              >
+                {seg.text}
+              </mark>
+            );
+          }
+          return <span key={i}>{seg.text}</span>;
+        })}
+      </p>
+    );
+  };
+
+  // Close bookmark panel on outside click (but not from our own trigger buttons)
+  useEffect(() => {
+    if (!showBookmarks) return;
+    const handleClick = (e: MouseEvent) => {
+      if (bookmarkPanelRef.current && !bookmarkPanelRef.current.contains(e.target as Node)) {
+        const target = e.target as HTMLElement;
+        if (target.closest('[data-bookmark-trigger]')) return; // don't close from our own buttons
+        setShowBookmarks(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showBookmarks]);
+
+  // Calculate current progress for display
+  const currentProgress = readMode === 'paginate'
+    ? ((currentSlideIndex + 1) / slides.length) * 100
+    : scrollProgress;
+
+  if (loading || !book || slides.length === 0) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-2 border-border border-t-muted rounded-full animate-spin" />
+          <span className="text-muted text-sm">加载中...</span>
+        </div>
       </div>
     );
   }
 
-  const currentContent = slides[currentSlideIndex];
-
   return (
-    <div className="min-h-screen bg-[#fafafa] dark:bg-[#050505] text-[#111] dark:text-[#eee] overflow-hidden selection:bg-emerald-100 selection:text-emerald-900">
-      
-      {/* Dynamic Background Elements */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden opacity-20 z-0">
-         <motion.div 
-            animate={{ 
-              scale: [1, 1.2, 1],
-              opacity: [0.1, 0.3, 0.1],
-            }}
-            transition={{ duration: 10, repeat: Infinity }}
-            className="absolute -top-1/4 -right-1/4 w-1/2 h-1/2 bg-emerald-400/20 blur-[120px] rounded-full" 
-         />
-      </div>
+    <div className="min-h-screen bg-background text-foreground overflow-hidden selection:bg-surface-hover">
 
-      {/* Interactive Header */}
-      <motion.nav 
-        initial={{ y: -20, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        className="fixed top-0 left-0 w-full p-8 flex justify-between items-center z-40 pointer-events-none"
-      >
-        <div className="flex items-center gap-6 pointer-events-auto">
-          <button onClick={() => router.push('/')} className="hover:scale-110 transition-transform p-2 bg-white/50 dark:bg-black/50 backdrop-blur-xl rounded-full border border-gray-200 dark:border-gray-800">
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          
-          <div className="flex items-center gap-3 bg-white/50 dark:bg-black/50 backdrop-blur-xl px-5 py-2 rounded-full border border-gray-200 dark:border-gray-800 shadow-sm">
-             <div className="flex items-center gap-2 text-emerald-600 font-mono text-xs font-bold">
-               <Sparkles className="w-3 h-3" />
-               <span>等级 {level}</span>
-             </div>
-             <div className="w-px h-3 bg-gray-300 dark:bg-gray-700" />
-             <div className="flex items-center gap-2 text-orange-500 font-mono text-xs font-bold">
-               <Flame className="w-3 h-3" />
-               <span>{exp % 100}%</span>
-             </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4 pointer-events-auto bg-white/50 dark:bg-black/50 backdrop-blur-xl px-5 py-2 rounded-full border border-gray-200 dark:border-gray-800 shadow-sm text-xs font-medium tracking-tighter uppercase text-gray-500">
-          进度 {currentSlideIndex + 1} / {slides.length}
-        </div>
-      </motion.nav>
-
-      {/* Main Memory Slide Container */}
-      <main className="relative z-10 min-h-screen flex flex-col items-center justify-center max-w-4xl mx-auto px-12">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentSlideIndex}
-            initial={{ opacity: 0, x: 50, scale: 0.95 }}
-            animate={{ opacity: 1, x: 0, scale: 1 }}
-            exit={{ opacity: 0, x: -50, scale: 1.05 }}
-            transition={{ type: "spring", damping: 25, stiffness: 120 }}
-            className="w-full"
+      {/* Minimal Header */}
+      <nav className="fixed top-0 left-0 w-full px-4 md:px-8 py-3 flex justify-between items-center z-40 bg-background/80 backdrop-blur-sm border-b border-border">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push('/')}
+            className="p-2 rounded-lg hover:bg-surface transition-colors"
+            title="返回书库"
           >
-            <div className="font-serif text-2xl md:text-3xl leading-[1.8] text-center md:text-left selection:bg-emerald-500 selection:text-white">
-              {currentContent.split(/\s+/).map((word, i) => {
-                const pureWord = word.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
-                const lowerWord = pureWord.toLowerCase();
-                const isHidden = hiddenKeywords.includes(pureWord);
-                const isRevealed = revealedKeywords.has(pureWord);
-                
-                return (
-                  <motion.span 
-                    key={i}
-                    layout
-                    whileHover={{ scale: 1.1, color: "#10b981" }}
-                    className={`inline-block mr-3 transition-all duration-500 ${
-                      isHidden && !isRevealed 
-                        ? 'blur-md cursor-help scale-95 opacity-50 select-none' 
-                        : isRevealed ? 'text-emerald-500 font-bold' : ''
-                    }`}
-                    onClick={() => isHidden && !isRevealed && handleKeywordCapture(pureWord)}
-                  >
-                    {word}
-                  </motion.span>
-                );
-              })}
-            </div>
-            
-            {showRecallGame && revealedKeywords.size < hiddenKeywords.length && (
-              <motion.div 
-                initial={{ opacity: 0, y: 20 }} 
-                animate={{ opacity: 1, y: 0 }}
-                className="mt-16 p-4 border border-dashed border-emerald-500/30 rounded-2xl bg-emerald-500/5 text-center"
-              >
-                <p className="text-xs uppercase tracking-[0.2em] font-bold text-emerald-600 mb-2 flex items-center justify-center gap-2">
-                   <Sparkles className="w-4 h-4" /> 需要神经锚点
-                </p>
-                <p className="text-sm text-gray-400">寻找并捕获 {hiddenKeywords.length - revealedKeywords.size} 个关键神经触发器以稳定此记忆。</p>
-              </motion.div>
-            )}
-          </motion.div>
-        </AnimatePresence>
-
-        {/* Navigation Controls */}
-        <div className="fixed bottom-12 left-0 w-full flex justify-center items-center gap-12 z-40">
-           <button 
-             onClick={prevSlide} 
-             disabled={currentSlideIndex === 0}
-             className="p-4 rounded-full bg-white dark:bg-gray-900 shadow-xl disabled:opacity-30 border border-gray-100 dark:border-gray-800 hover:scale-110 transition-all active:scale-95"
-           >
-             <ChevronLeft className="w-6 h-6" />
-           </button>
-
-           <button 
-             onClick={nextSlide} 
-             className="group relative p-6 rounded-full bg-emerald-500 text-white shadow-[0_20px_50px_-15px_rgba(16,185,129,0.5)] hover:scale-110 transition-all active:scale-95 overflow-hidden"
-           >
-             <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-500" />
-             <ChevronRight className="w-8 h-8 relative z-10" />
-           </button>
+            <ArrowLeft className="w-5 h-5 text-muted" />
+          </button>
+          <span className="text-sm text-muted hidden md:inline truncate max-w-[200px]">
+            {book.title}
+          </span>
         </div>
-      </main>
 
-      {/* Progress Indicator */}
-      <div className="fixed top-0 left-0 w-full h-1 bg-gray-100 dark:bg-gray-900 overflow-hidden z-50">
-        <motion.div 
+        <div className="flex items-center gap-3">
+          {/* Theme Toggle */}
+          <button
+            onClick={toggleTheme}
+            className="p-2 rounded-lg hover:bg-surface transition-colors"
+            title={theme === 'light' ? '切换夜间模式' : '切换白天模式'}
+          >
+            {theme === 'light' ? <Moon className="w-4 h-4 text-muted" /> : <Sun className="w-4 h-4 text-muted" />}
+          </button>
+
+          {/* Mode Toggle */}
+          <button
+            onClick={toggleMode}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-muted hover:bg-surface transition-colors"
+            title={readMode === 'paginate' ? '切换到滚动模式' : '切换到翻页模式'}
+          >
+            {readMode === 'paginate' ? <ScrollText className="w-3.5 h-3.5" /> : <BookOpen className="w-3.5 h-3.5" />}
+            <span className="hidden md:inline">{readMode === 'paginate' ? '滚动' : '翻页'}</span>
+          </button>
+
+          {/* Annotation panel toggle */}
+          <button
+            onClick={() => setShowAnnotations(!showAnnotations)}
+            className="p-2 rounded-lg hover:bg-surface transition-colors relative"
+            title="笔记与标注"
+          >
+            <Highlighter className="w-4 h-4 text-muted" />
+            {annotations.length > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] bg-surface rounded-full text-[8px] flex items-center justify-center text-muted font-bold px-0.5">
+                {annotations.length}
+              </span>
+            )}
+          </button>
+
+          {/* Bookmark: click to add, click badge to open list */}
+          <div className="relative flex items-center">
+            <button
+              onClick={addBookmark}
+              className={`p-2 rounded-lg hover:bg-surface transition-all ${bookmarkFlash ? 'scale-125 text-foreground' : 'scale-100'}`}
+              title="添加书签"
+              data-bookmark-trigger
+            >
+              <Bookmark className={`w-4 h-4 transition-colors ${bookmarkFlash ? 'text-foreground' : 'text-muted'}`} />
+            </button>
+            {bookmarks.length > 0 && (
+              <button
+                onClick={() => setShowBookmarks(!showBookmarks)}
+                className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] bg-surface rounded-full text-[8px] flex items-center justify-center text-muted font-bold px-0.5 hover:bg-surface-hover transition-colors"
+                title="查看书签列表"
+                data-bookmark-trigger
+              >
+                {bookmarks.length}
+              </button>
+            )}
+          </div>
+
+          {/* Progress */}
+          <span className="text-xs font-mono text-muted tabular-nums">
+            {readMode === 'paginate'
+              ? `${currentSlideIndex + 1} / ${slides.length}`
+              : `${Math.round(currentProgress)}%`
+            }
+          </span>
+        </div>
+
+        {/* Bookmark Panel */}
+        <AnimatePresence>
+          {showBookmarks && (
+            <motion.div
+              ref={bookmarkPanelRef}
+              initial={{ opacity: 0, y: -8, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.95 }}
+              transition={{ duration: 0.15 }}
+              className="absolute top-full right-4 md:right-8 mt-1 w-72 bg-background border border-border rounded-xl shadow-xl overflow-hidden z-50"
+            >
+              <div className="p-3 border-b border-border flex items-center justify-between">
+                <span className="text-sm font-medium">书签</span>
+                <button
+                  onClick={() => setShowBookmarks(false)}
+                  className="p-1 rounded hover:bg-surface transition-colors"
+                >
+                  <X className="w-3.5 h-3.5 text-muted" />
+                </button>
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {bookmarks.length === 0 ? (
+                  <p className="p-4 text-sm text-muted text-center">暂无书签</p>
+                ) : (
+                  bookmarks.map((bm) => (
+                    <button
+                      key={bm.id}
+                      onClick={() => jumpToBookmark(bm)}
+                      className="w-full p-3 flex items-center gap-3 hover:bg-surface transition-colors text-left group border-b border-border last:border-b-0"
+                    >
+                      <Bookmark className="w-3.5 h-3.5 text-muted flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-foreground truncate">
+                          {bm.label || `${Math.round(bm.progress)}%`}
+                        </p>
+                        <p className="text-xs text-muted">
+                          {bm.mode === 'paginate' && bm.slideIndex != null
+                            ? `第 ${bm.slideIndex + 1} 页`
+                            : `滚动 ${Math.round(bm.progress)}%`
+                          }
+                        </p>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); deleteBookmark(bm.id); }}
+                        className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-surface-hover transition-all"
+                        title="删除书签"
+                      >
+                        <X className="w-3 h-3 text-muted" />
+                      </button>
+                    </button>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </nav>
+
+      {/* Progress Bar */}
+      <div className="fixed top-0 left-0 w-full h-[2px] bg-progress-bg z-50">
+        <motion.div
           initial={{ width: 0 }}
-          animate={{ width: `${((currentSlideIndex + 1) / slides.length) * 100}%` }}
-          className="h-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]"
+          animate={{ width: `${currentProgress}%` }}
+          transition={{ duration: 0.3, ease: 'easeOut' }}
+          className="h-full bg-progress-fill"
         />
       </div>
 
-      {/* Zeigarnik Cliffhanger Modal */}
-      <AnimatePresence>
-        {showCliffhanger && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-md"
-          >
-            <motion.div 
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
-              className="bg-[#111] border border-gray-800 p-10 rounded-3xl max-w-lg w-full text-center relative overflow-hidden"
+      {/* Main Content Area */}
+      {readMode === 'paginate' ? (
+        /* ========== PAGINATE MODE ========== */
+        <main className="pt-14 min-h-screen flex flex-col items-center justify-center max-w-2xl mx-auto px-6 md:px-12">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={currentSlideIndex}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.25 }}
+              className="w-full"
             >
-              <Lock className="w-12 h-12 text-emerald-500 mx-auto mb-6" />
-              <h2 className="text-3xl font-bold text-white mb-4">悬念锁定</h2>
-              <p className="text-gray-400 mb-8 leading-relaxed">
-                您已经阅读了本章节的 98%。接下来会发生什么？神经通路必须冷却后才能继续。
+              <div id="reader-content" className="font-serif text-xl md:text-2xl text-center md:text-left text-foreground prose-reader">
+                {slides[currentSlideIndex].map((para, i) => (
+                  renderHighlightedParagraph(para, i, isCJK(para))
+                ))}
+              </div>
+            </motion.div>
+          </AnimatePresence>
+
+          {/* Paginate Navigation */}
+          <div className="fixed inset-y-0 left-0 flex items-center pl-3 md:pl-6 z-40">
+            <button
+              onClick={prevSlide}
+              disabled={currentSlideIndex === 0}
+              className="p-2 rounded-full hover:bg-surface transition-all active:scale-95 disabled:opacity-0 disabled:pointer-events-none text-muted"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="fixed inset-y-0 right-0 flex items-center pr-3 md:pr-6 z-40">
+            <button
+              onClick={nextSlide}
+              disabled={currentSlideIndex === slides.length - 1}
+              className="p-2 rounded-full hover:bg-surface transition-all active:scale-95 disabled:opacity-0 disabled:pointer-events-none text-muted"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          </div>
+        </main>
+      ) : (
+        /* ========== SCROLL MODE ========== */
+        <main
+          ref={scrollContainerRef}
+          className="pt-14 h-screen overflow-y-auto scroll-smooth"
+        >
+          <div className="max-w-2xl mx-auto px-6 md:px-12 py-12">
+            <div id="reader-content" className="font-serif text-xl md:text-2xl text-foreground prose-reader">
+              {paragraphs.map((p, i) => (
+                renderHighlightedParagraph(p, i, isCJK(p))
+              ))}
+            </div>
+            {/* End padding so last section is reachable */}
+            <div className="h-[50vh]" />
+          </div>
+        </main>
+      )}
+      {/* Annotation Toolbar (floating, on text selection) */}
+      <AnnotationToolbar
+        onHighlight={(color) => addAnnotationFromSelection(color)}
+        onNote={(color) => {
+          // Capture selection info before it's lost, then show inline note input
+          const selection = window.getSelection();
+          if (!selection || selection.isCollapsed) return;
+          const selectedText = selection.toString().trim();
+          if (!selectedText) return;
+          const textOffset = fullText.indexOf(selectedText);
+          const startOffset = textOffset !== -1 ? textOffset : 0;
+          const { prefix, suffix } = getSelectionContext(fullText, selectedText, startOffset);
+          // Carry the toolbar's current color selection to the note
+          setNoteAnnotation({ color, selectedText, prefix, suffix });
+          setNoteText('');
+          // Clear selection and hide toolbar
+          selection.removeAllRanges();
+          setToolbarVisible(false);
+        }}
+        visible={toolbarVisible}
+        position={toolbarPosition}
+      />
+
+      {/* Inline note input (shown when user clicked "笔记" in toolbar) */}
+      <AnimatePresence>
+        {noteAnnotation && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-0 left-0 right-0 z-[70] bg-background border-t border-border p-4 shadow-2xl"
+          >
+            <div className="max-w-2xl mx-auto">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium">添加笔记</span>
+                <button
+                  onClick={() => setNoteAnnotation(null)}
+                  className="p-1 rounded hover:bg-surface transition-colors"
+                >
+                  <X className="w-4 h-4 text-muted" />
+                </button>
+              </div>
+              <p className={`text-sm mb-3 px-1 rounded-sm ${getHighlightClass(noteAnnotation.color)}`}>
+                {noteAnnotation.selectedText.length > 80
+                  ? noteAnnotation.selectedText.slice(0, 80) + '…'
+                  : noteAnnotation.selectedText
+                }
               </p>
-              
-              <div className="flex flex-col gap-3">
-                <button 
+              <textarea
+                value={noteText}
+                onChange={(e) => setNoteText(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    saveAnnotation({
+                      text: noteAnnotation!.selectedText,
+                      prefix: noteAnnotation!.prefix,
+                      suffix: noteAnnotation!.suffix,
+                      color: noteAnnotation!.color,
+                      note: noteText.trim() || null,
+                    });
+                    setNoteAnnotation(null);
+                    setNoteText('');
+                  }
+                }}
+                placeholder="写下你的想法..."
+                className="w-full text-sm bg-surface border border-border rounded-lg p-3 text-foreground placeholder-muted/50 resize-none outline-none focus:ring-1 focus:ring-border"
+                rows={3}
+                autoFocus
+              />
+              <div className="flex items-center justify-between mt-2">
+                <span className="text-[10px] text-muted/50">⌘+Enter 保存</span>
+                <button
                   onClick={() => {
-                     reportAction(currentSlideIndex, 'unlock_cliffhanger');
-                     setCliffhangerResolved(true);
-                     setShowCliffhanger(false);
-                     nextSlide();
+                    saveAnnotation({
+                      text: noteAnnotation.selectedText,
+                      prefix: noteAnnotation.prefix,
+                      suffix: noteAnnotation.suffix,
+                      color: noteAnnotation.color,
+                      note: noteText.trim() || null,
+                    });
+                    setNoteAnnotation(null);
+                    setNoteText('');
                   }}
-                  className="w-full py-4 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-400 transition-colors"
+                  className="px-4 py-2 bg-foreground text-background rounded-lg text-sm font-medium hover:opacity-80 transition-opacity"
                 >
-                  解除锁定 (消耗 50 经验)
-                </button>
-                <button 
-                  onClick={() => router.push('/')}
-                  className="w-full py-4 rounded-xl bg-transparent border border-gray-700 text-gray-300 font-bold hover:bg-gray-800 transition-colors"
-                >
-                  返回书库
+                  保存笔记
                 </button>
               </div>
-            </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Pre-read Warmup Modal */}
-      <AnimatePresence>
-        {showWarmupGame && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md"
-          >
-            <motion.div 
-              initial={{ scale: 0.9 }}
-              animate={{ scale: 1 }}
-              className="bg-white dark:bg-[#0a0a0a] border border-gray-200 dark:border-gray-800 p-8 rounded-3xl max-w-2xl w-full"
-            >
-              <div className="flex items-center gap-3 mb-6">
-                <Zap className="w-6 h-6 text-orange-500" />
-                <h2 className="text-2xl font-bold">神经热身</h2>
-              </div>
-              <p className="text-gray-500 mb-8">重新激活上次阅读会话中的记忆通路，以避免艾宾浩斯遗忘曲线惩罚。</p>
-              
-              <div className="flex flex-wrap gap-4 mb-8">
-                {warmupKeywords.map((word, i) => {
-                  const isRevealed = warmupRevealed.has(word);
-                  return (
-                    <motion.button
-                      key={i}
-                      whileHover={!isRevealed ? { scale: 1.05 } : {}}
-                      whileTap={!isRevealed ? { scale: 0.95 } : {}}
-                      onClick={() => !isRevealed && handleWarmupCapture(word)}
-                      className={`px-6 py-3 rounded-xl font-bold text-lg transition-all ${
-                        isRevealed 
-                        ? 'bg-emerald-500 text-white shadow-[0_0_20px_rgba(16,185,129,0.4)]' 
-                        : 'bg-gray-100 dark:bg-gray-900 text-gray-400 hover:text-emerald-500 hover:border-emerald-500/50 border border-transparent'
-                      }`}
-                    >
-                      {word}
-                    </motion.button>
-                  );
-                })}
-              </div>
-
-              <div className="flex justify-between items-center mt-6 pt-6 border-t border-gray-100 dark:border-gray-800">
-                 <span className="text-sm font-mono text-gray-400">已捕获 {warmupRevealed.size} / {warmupKeywords.length}</span>
-                 <button 
-                   onClick={() => {
-                     reportAction(currentSlideIndex, 'skip_warmup');
-                     setShowWarmupGame(false);
-                   }}
-                   className="text-xs uppercase tracking-widest text-gray-500 hover:text-red-500"
-                 >
-                   跳过 (扣除经验)
-                 </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Drop Modal (Loot Box) */}
-      <AnimatePresence>
-        {activeDrop && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-          >
-            <motion.div 
-              initial={{ scale: 0.8, y: 50, rotate: -5 }}
-              animate={{ scale: 1, y: 0, rotate: 0 }}
-              exit={{ scale: 0.8, opacity: 0 }}
-              transition={{ type: "spring", damping: 15 }}
-              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center relative overflow-hidden"
-            >
-              {/* Rarity Background Glow */}
-              <div className={`absolute inset-0 opacity-20 ${
-                activeDrop.rarity === 'legendary' ? 'bg-gradient-to-tr from-yellow-500 to-amber-300' :
-                activeDrop.rarity === 'epic' ? 'bg-gradient-to-tr from-purple-500 to-fuchsia-400' :
-                activeDrop.rarity === 'rare' ? 'bg-gradient-to-tr from-blue-500 to-cyan-400' :
-                'bg-gradient-to-tr from-gray-300 to-gray-100'
-              }`} />
-
-              <div className="relative z-10 flex flex-col items-center">
-                <div className={`p-4 rounded-full mb-6 ${
-                  activeDrop.rarity === 'legendary' ? 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400' :
-                  activeDrop.rarity === 'epic' ? 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400' :
-                  activeDrop.rarity === 'rare' ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' :
-                  'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
-                }`}>
-                  <Gift className="w-12 h-12" />
-                </div>
-                
-                <h3 className="text-2xl font-bold mb-2">{activeDrop.name}</h3>
-                <p className="text-sm font-medium uppercase tracking-widest text-gray-400 mb-4">{activeDrop.rarity}</p>
-                <p className="text-gray-600 dark:text-gray-400 mb-8">{activeDrop.description}</p>
-                
-                <button 
-                  onClick={handleClearDrop}
-                  className="w-full py-4 rounded-xl bg-gray-900 text-white dark:bg-white dark:text-black font-semibold hover:scale-105 active:scale-95 transition-all"
-                >
-                  收集
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
+      {/* Annotation Panel (side drawer) */}
+      <AnnotationPanel
+        annotations={annotations}
+        visible={showAnnotations}
+        focusedId={focusedAnnotationId}
+        onClose={() => { setShowAnnotations(false); setFocusedAnnotationId(null); }}
+        onJump={jumpToAnnotation}
+        onDelete={deleteAnnotation}
+        onUpdateNote={updateAnnotationNote}
+        onExport={exportAnnotations}
+      />
     </div>
+  );
+}
+
+export default function Reader({ params }: { params: Promise<{ id: string }> }) {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-2 border-border border-t-muted rounded-full animate-spin" />
+          <span className="text-muted text-sm">加载中...</span>
+        </div>
+      </div>
+    }>
+      <ReaderInner params={params} />
+    </Suspense>
   );
 }

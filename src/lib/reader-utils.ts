@@ -3,61 +3,133 @@
  */
 
 /**
- * Utility to split long text into logical chunks (slides)
+ * Detects if text starts with CJK character or CJK punctuation
  */
-export function chunkText(text: string, charsPerChunk: number = 200): string[] {
-  if (!text) return [];
-  
-  // Split by common punctuation to form sentences
-  const sentences = text.match(/[^。！？\.!\?]+[。！？\.!\?]+/g) || [text];
-  const chunks: string[] = [];
-  let currentChunk = "";
+export function isCJK(text: string): boolean {
+  return /^[\u4e00-\u9fa5\u201c\u2018\u300e\u300c]/.test(text.trim());
+}
 
-  for (const sentence of sentences) {
-    // If the sentence itself is too long, we might need to split it forcefully, but for now we just add it
-    if (currentChunk.length + sentence.length > charsPerChunk && currentChunk !== "") {
-      chunks.push(currentChunk.trim());
-      currentChunk = sentence;
-    } else {
-      currentChunk += (currentChunk ? " " : "") + sentence.trim();
-    }
-  }
+/**
+ * Collapses single newlines and adds Hair Space (U+200A) between CJK and Latin/Numbers
+ */
+export function formatTypography(text: string): string {
+  return text
+    .replace(/\n/g, ' ');
+  // Note: CJK-Latin spacing handled by CSS `text-autospace: ideograph-alpha`
+  // as progressive enhancement. No manual hair space insertion to avoid
+  // double-spacing when browsers adopt text-autospace.
+}
 
-  if (currentChunk) {
-    chunks.push(currentChunk.trim());
-  }
+/**
+ * Splits raw text into clean paragraphs
+ */
+export function parseParagraphs(text: string): string[] {
+  return text
+    .split(/\n\s*\n+/)
+    .map(p => formatTypography(p).trim())
+    .filter(Boolean);
+}
 
-  // Handle case where no punctuation was found or one huge chunk was created
-  if (chunks.length === 1 && chunks[0].length > charsPerChunk * 2) {
-      const splitChunks = [];
-      let i = 0;
-      while(i < chunks[0].length) {
-          splitChunks.push(chunks[0].slice(i, i + charsPerChunk));
-          i += charsPerChunk;
+/**
+ * Split a single long paragraph into smaller pieces at sentence boundaries.
+ * Only used when a single paragraph exceeds charsPerChunk.
+ */
+function splitLongParagraph(para: string, maxLen: number): string[] {
+  if (para.length <= maxLen) return [para];
+
+  // Try to split at sentence-ending punctuation
+  const sentences = para.match(/[^。！？\.!?]+[。！？\.!?]+/g);
+  if (sentences && sentences.length > 1) {
+    // Check for unmatched trailing text (no terminal punctuation)
+    const matched = sentences.join('');
+    const remainder = para.slice(matched.length).trim();
+    if (remainder) sentences.push(remainder);
+
+    const result: string[] = [];
+    let buf = '';
+    for (const s of sentences) {
+      if (buf.length + s.length > maxLen && buf) {
+        result.push(buf.trim());
+        buf = s;
+      } else {
+        buf += s;
       }
-      return splitChunks;
+    }
+    if (buf.trim()) result.push(buf.trim());
+    return result;
   }
 
+  // Fallback: hard split
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < para.length) {
+    chunks.push(para.slice(i, i + maxLen));
+    i += maxLen;
+  }
   return chunks;
 }
 
 /**
- * Identifies key terms for the "Active Recall" game.
+ * Split text into slides, respecting paragraph boundaries.
+ * Each slide is an array of paragraphs (for proper rendering with <p> tags).
+ * Paragraphs are never split across slides — long paragraphs are split at
+ * sentence boundaries and each piece becomes its own paragraph within the slide.
  */
-export function identifyKeywords(text: string, count: number = 3): string[] {
+export function chunkText(text: string, charsPerChunk: number = 200): string[][] {
   if (!text) return [];
-  
-  // Match English words or Chinese characters
-  // We want continuous chunks of Chinese characters (e.g., words)
-  // For simplicity without a complex segmenter, we grab chunks of 2-4 Chinese characters or English words > 4 chars.
-  
-  const chineseWords = text.match(/[\u4e00-\u9fa5]{2,4}/g) || [];
-  const englishWords = text.match(/\b[a-zA-Z]{5,}\b/g) || [];
-  
-  const allWords = [...chineseWords, ...englishWords];
-  
-  // Deduplicate and filter out very common stop words if needed
-  const uniqueWords = Array.from(new Set(allWords));
-  
-  return uniqueWords.sort(() => 0.5 - Math.random()).slice(0, count);
+
+  const rawParagraphs = text
+    .split(/\n\s*\n+/)
+    .map(p => formatTypography(p).trim())
+    .filter(Boolean);
+
+  if (rawParagraphs.length === 0) return [];
+
+  const slides: string[][] = [];
+  let currentParagraphs: string[] = [];
+  let currentLength = 0;
+
+  for (const para of rawParagraphs) {
+    const paraLen = para.length;
+
+    // If adding this paragraph would exceed the chunk size and we already have content,
+    // finish the current slide
+    if (currentLength + paraLen > charsPerChunk && currentParagraphs.length > 0) {
+      slides.push(currentParagraphs);
+      currentParagraphs = [];
+      currentLength = 0;
+    }
+
+    // If a single paragraph is longer than the chunk size, split it
+    if (paraLen > charsPerChunk) {
+      // First, push any existing content as its own slide
+      if (currentParagraphs.length > 0) {
+        slides.push(currentParagraphs);
+        currentParagraphs = [];
+        currentLength = 0;
+      }
+      // Split the long paragraph and make each piece a separate slide
+      const pieces = splitLongParagraph(para, charsPerChunk);
+      for (let i = 0; i < pieces.length; i++) {
+        if (i < pieces.length - 1) {
+          slides.push([pieces[i]]);
+        } else {
+          // Last piece: start a new current slide so subsequent short
+          // paragraphs can be appended to it
+          currentParagraphs = [pieces[i]];
+          currentLength = pieces[i].length;
+        }
+      }
+    } else {
+      // Normal paragraph: add to current slide
+      currentParagraphs.push(para);
+      currentLength += paraLen;
+    }
+  }
+
+  if (currentParagraphs.length > 0) {
+    slides.push(currentParagraphs);
+  }
+
+  return slides;
 }

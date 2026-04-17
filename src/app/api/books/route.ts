@@ -5,7 +5,9 @@ export async function GET() {
   try {
     const books = await prisma.book.findMany({
       include: {
-        progress: true
+        progress: true,
+        bookmarks: { orderBy: { progress: 'asc' } },
+        annotations: { orderBy: { progress: 'asc' } },
       },
       orderBy: {
         updatedAt: 'desc'
@@ -15,15 +17,7 @@ export async function GET() {
     // Also fetch basic user stats
     let userStats = await prisma.userStats.findFirst();
     if (!userStats) {
-      userStats = await prisma.userStats.create({
-        data: {
-          streakDays: 0,
-          totalReadMin: 0,
-          exp: 0,
-          level: 1,
-          flameHealth: 100
-        }
-      });
+      userStats = await prisma.userStats.create({ data: {} });
     }
 
     return NextResponse.json({ books, userStats });
